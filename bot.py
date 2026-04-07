@@ -24,25 +24,22 @@ from telegram.ext import (
     CallbackQueryHandler
 )
 
-# ------------------ ЗАГРУЗКА ПЕРЕМЕННЫХ ------------------
+# ------------------ ЗАГРУЗКА ------------------
 load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
-# ------------------ ПРОВЕРКА КЛЮЧЕЙ ------------------
-print("🔍 Проверка переменных окружения:")
-print(f"TOKEN: {'✅ Загружен' if TOKEN else '❌ Не найден'}")
-print(f"OPENAI_API_KEY: {'✅ Загружен' if OPENAI_API_KEY else '❌ Не найден'}")
-print(f"GOOGLE_MAPS_API_KEY: {'✅ Загружен' if GOOGLE_MAPS_API_KEY else '❌ Не найден'}")
-
-if not OPENAI_API_KEY or not GOOGLE_MAPS_API_KEY:
-    print("⚠️  ВНИМАНИЕ: Один из ключей отсутствует!")
+SYSTEM_PROMPT = """
+Ты помощник по автомобилям.
+Отвечай кратко и по делу.
+Помогай определить проблему и при необходимости предлагай сервис.
+"""
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ------------------ СОСТОЯНИЯ И БАЗА ------------------
+# ------------------ БАЗА ------------------
 user_states = {}
 
 conn = sqlite3.connect("bot.db", check_same_thread=False)
@@ -77,15 +74,23 @@ CREATE TABLE IF NOT EXISTS cars (
 
 conn.commit()
 
-# ------------------ КАТЕГОРИИ ПРОБЛЕМ ------------------
+# ------------------ КАТЕГОРИИ ------------------
 CATEGORY_MAP = {
-    "category_engine":   ("🔧 Двигатель / СТО",     ["автосервис", "СТО", "car repair"]),
-    "category_wheel":    ("🛞 Шиномонтаж / Колёса", ["шиномонтаж", "шины", "tires"]),
-    "category_wash":     ("🚿 Автомойка",           ["автомойка", "мойка", "car wash"]),
-    "category_parts":    ("🔩 Запчасти",            ["автозапчасти", "запчасти", "auto parts store"]),
-    "category_detailing":("✨ Детейлинг",            ["детейлинг", "полировка", "detailing"]),
-    "category_other":    ("📍 Другое / Общий сервис",["автосервис", "СТО"]),
+    "category_engine": ("🔧 Двигатель / СТО", ["автосервис"]),
+    "category_wheel": ("🛞 Шиномонтаж", ["шиномонтаж"]),
+    "category_wash": ("🚿 Автомойка", ["автомойка"]),
+    "category_parts": ("🔩 Запчасти", ["автозапчасти"]),
+    "category_other": ("📍 Общее", ["СТО"]),
 }
+
+# ------------------ МЕНЮ ------------------
+def get_main_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["🚗 Указать авто", "📍 Найти сервис"],
+        ],
+        resize_keyboard=True
+    )
 
 # ------------------ HELPERS ------------------
 def save_message(user_id, role, content):
@@ -95,7 +100,7 @@ def save_message(user_id, role, content):
     )
     conn.commit()
 
-def get_last_messages(user_id, limit=20):
+def get_last_messages(user_id, limit=10):
     cursor.execute(
         "SELECT role, content FROM messages WHERE user_id=? ORDER BY id DESC LIMIT ?",
         (user_id, limit)
@@ -108,167 +113,124 @@ def save_location(user_id, lat, lon):
     cursor.execute("INSERT OR REPLACE INTO users VALUES (?, ?, ?)", (user_id, lat, lon))
     conn.commit()
 
-def get_location(user_id):
-    cursor.execute("SELECT latitude, longitude FROM users WHERE user_id=?", (user_id,))
+def get_user_car(user_id):
+    cursor.execute("SELECT brand, model FROM cars WHERE user_id=?", (user_id,))
     row = cursor.fetchone()
-    return (row[0], row[1]) if row else None
+    return f"{row[0]} {row[1]}" if row else None
 
-def save_user_car(user_id, brand, model, generation, year):
+def save_user_car(user_id, brand, model):
     cursor.execute(
         "INSERT OR REPLACE INTO cars VALUES (?, ?, ?, ?, ?)",
-        (user_id, brand, model, generation, year)
+        (user_id, brand, model, "", None)
     )
     conn.commit()
 
-def get_user_car(user_id):
-    cursor.execute(
-        "SELECT brand, model, generation, year FROM cars WHERE user_id=?",
-        (user_id,)
-    )
-    row = cursor.fetchone()
-    return {"brand": row[0], "model": row[1], "generation": row[2], "year": row[3]} if row else None
-
-def generate_maps_link(user_lat, user_lon, dest_lat, dest_lon):
-    params = urllib.parse.urlencode({
-        "api": "1",
-        "origin": f"{user_lat},{user_lon}",
-        "destination": f"{dest_lat},{dest_lon}"
-    })
-    return f"https://www.google.com/maps/dir/?{params}"
-
-# Новый умный поиск по категории
-async def search_places(lat: float, lng: float, keywords: list, radius: int = 8000):
+async def search_places(lat, lng, keyword):
     url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
-    main_keyword = keywords[0]
 
     params = {
         "location": f"{lat},{lng}",
-        "radius": radius,
-        "keyword": main_keyword,
+        "radius": 5000,
+        "keyword": keyword,
         "key": GOOGLE_MAPS_API_KEY,
         "language": "ru",
     }
 
-    try:
-        res = requests.get(url, params=params, timeout=10).json()
-        results = res.get("results", [])[:5]
+    res = requests.get(url, params=params).json()
+    results = res.get("results", [])[:5]
 
-        if not results:
-            return f"😔 Рядом не найдено мест по запросу «{main_keyword}»."
+    if not results:
+        return "❌ Ничего не найдено"
 
-        text = f"🔍 Найдено ближайших мест ({main_keyword}):\n\n"
-        for place in results:
-            name = place.get("name", "Без названия")
-            address = place.get("vicinity", "Адрес не указан")
-            rating = place.get("rating", "—")
-            text += f"📍 <b>{name}</b>\n📌 {address}\n⭐ {rating}\n\n"
+    text = "🔍 Найдено:\n\n"
+    for place in results:
+        text += f"📍 {place['name']}\n⭐ {place.get('rating', '—')}\n\n"
 
-        return text
-    except Exception as e:
-        print(e)
-        return "❌ Ошибка поиска на Google Maps"
+    return text
 
 # ------------------ HANDLERS ------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Здравствуйте, я ваш Авто помощник. Я тут чтобы вам помочь с любыми вопросами по поводу вашего Авто! ")
+    await update.message.reply_text(
+        "Привет! Опиши проблему или выбери действие 👇",
+        reply_markup=get_main_keyboard()
+    )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = update.message.text.strip().lower()
+    text = update.message.text
 
-    state = user_states.get(user_id, {})
-    car = get_user_car(user_id)
-
-    # Обработка сохранения авто
-    if state.get("waiting_for_car"):
-        # ... (твой старый код сохранения авто оставляем без изменений)
-        try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "system", "content": "Верни JSON: brand, model, generation, year"},
-                          {"role": "user", "content": text}],
-                temperature=0,
-                max_tokens=150
-            )
-            parsed = response.choices[0].message.content
-            parsed = re.sub(r"```json|```", "", parsed).strip()
-            match = re.search(r"\{.*\}", parsed, re.DOTALL)
-            if match:
-                car_data = json.loads(match.group(0))
-                year = int(car_data.get("year")) if str(car_data.get("year")).isdigit() else None
-                save_user_car(user_id, car_data.get("brand"), car_data.get("model"),
-                              car_data.get("generation"), year)
-                user_states[user_id]["waiting_for_car"] = False
-                await update.message.reply_text("Авто сохранено ✅")
-        except:
-            await update.message.reply_text("Напиши типа: Mercedes E55 2002")
+    # --- кнопки ---
+    if text == "🚗 Указать авто":
+        user_states[user_id] = {"waiting_car": True}
+        await update.message.reply_text("Напиши: Toyota Camry 2018")
         return
 
-    # Основной чат с GPT
+    if text == "📍 Найти сервис":
+        await show_categories(update, context)
+        return
+
+    # --- ввод авто ---
+    if user_states.get(user_id, {}).get("waiting_car"):
+        try:
+            parts = text.split()
+            save_user_car(user_id, parts[0], parts[1])
+            user_states[user_id]["waiting_car"] = False
+            await update.message.reply_text("✅ Авто сохранено", reply_markup=get_main_keyboard())
+        except:
+            await update.message.reply_text("❌ Напиши нормально: BMW X5")
+        return
+
+    # --- GPT ---
     history = get_last_messages(user_id)
+
     if not history:
         history = [{"role": "system", "content": SYSTEM_PROMPT}]
+    else:
+        history.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
 
-    car_text = f"\nАвто: {car['brand']} {car['model']}" if car else ""
-    history.append({"role": "user", "content": text + car_text})
+    car = get_user_car(user_id)
+    if car:
+        text += f"\nАвто: {car}"
+
+    history.append({"role": "user", "content": text})
     save_message(user_id, "user", text)
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=history,
-            max_tokens=400
+            messages=history
         )
         reply = response.choices[0].message.content
-        save_message(user_id, "assistant", reply)
     except Exception as e:
         print(e)
-        await update.message.reply_text("Ошибка GPT")
+        await update.message.reply_text("❌ Ошибка GPT")
         return
 
-    # Если GPT просит марку авто
-    if ("марка" in reply.lower() or "модель" in reply.lower()) and not car:
-        user_states[user_id] = {"waiting_for_car": True}
-        await update.message.reply_text("Напиши марку и модель авто (например: Toyota Camry 2018)")
-        return
-
-    # Если GPT предлагает найти СТО → показываем категории
-    if any(word in reply.lower() for word in ["сто", "сервис", "мастер", "ремонт", "проблема", "сломал"]):
-        await show_categories(update, context)
-        return
-
+    save_message(user_id, "assistant", reply)
     await update.message.reply_text(reply)
 
-
 async def show_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показываем кнопки категорий"""
     keyboard = [
         [InlineKeyboardButton(text, callback_data=key)]
         for key, (text, _) in CATEGORY_MAP.items()
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        "Уточни тип проблемы, чтобы я нашёл подходящие места:",
-        reply_markup=reply_markup
+        "Выбери категорию:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
-
 
 async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     user_id = query.from_user.id
-    category_key = query.data
+    category = query.data
 
-    user_states[user_id] = {"category": category_key}
+    user_states[user_id] = {"category": category}
 
-    category_name = CATEGORY_MAP[category_key][0]
-
-    await query.edit_message_text(
-        f"Выбрано: <b>{category_name}</b>\n\n"
-        "Теперь отправь свою локацию (нажми на кнопку 📍 ниже)",
-        parse_mode='HTML',
+    await query.message.reply_text(
+        "Отправь геолокацию 📍",
         reply_markup=ReplyKeyboardMarkup(
             [[KeyboardButton("📍 Отправить локацию", request_location=True)]],
             resize_keyboard=True,
@@ -276,51 +238,21 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     )
 
-
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     loc = update.message.location
 
-    save_location(user_id, loc.latitude, loc.longitude)
-
     state = user_states.get(user_id, {})
-    category_key = state.get("category")
+    category = state.get("category")
 
-    if not category_key:
-        await update.message.reply_text("Сначала выбери категорию проблемы.")
+    if not category:
+        await update.message.reply_text("Сначала выбери категорию")
         return
 
-    keywords = CATEGORY_MAP.get(category_key, [None])[1]
-    result_text = await search_places(loc.latitude, loc.longitude, keywords)
+    keyword = CATEGORY_MAP[category][1][0]
+    result = await search_places(loc.latitude, loc.longitude, keyword)
 
-    await update.message.reply_text(result_text, parse_mode='HTML')
-
-    # Очищаем состояние
-    if user_id in user_states:
-        user_states[user_id].pop("category", None)
-
-
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # твой старый код обработки фото
-    photo = update.message.photo[-1]
-    file = await context.bot.get_file(photo.file_id)
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Определи проблему авто"},
-                    {"type": "image_url", "image_url": {"url": file.file_path}}
-                ]
-            }],
-            max_tokens=300
-        )
-        await update.message.reply_text(response.choices[0].message.content)
-    except Exception as e:
-        print(e)
-        await update.message.reply_text("Ошибка анализа фото")
-
+    await update.message.reply_text(result, reply_markup=get_main_keyboard())
 
 # ------------------ MAIN ------------------
 if __name__ == "__main__":
@@ -329,9 +261,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(CallbackQueryHandler(category_callback))
 
-    app.add_handler(CallbackQueryHandler(category_callback, pattern="^category_"))
-
-    print("✅ Бот запущен с умным поиском по категориям")
+    print("🚀 Бот запущен")
     app.run_polling()
