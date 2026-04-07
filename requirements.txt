@@ -2,3 +2,4 @@ python-telegram-bot==21.11.1
 openai
 requests
 python-dotenv==1.0.1
+cloudinary==1.33.0
