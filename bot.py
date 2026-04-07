@@ -246,21 +246,28 @@ async def handle_service_choice(update: Update, context: ContextTypes.DEFAULT_TY
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Команды
+    # --- Команды ---
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))  # латиница для Telegram
 
-    # Обработчик текста на русском
-    async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # --- Объединённый хендлер текста ---
+    async def combined_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text.lower()
+
+        # Проверка на русский "меню"
         if text == "меню":
             await menu(update, context)
+            return
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+        # Основная логика обработки сообщений
+        await handle_message(update, context)
 
-    # Обработчики сообщений, фото, локации
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, combined_text_handler))
+
+    # --- Фото ---
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    # --- Локация ---
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
 
     print("🔥 Умный бот запущен")
