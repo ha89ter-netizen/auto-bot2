@@ -246,12 +246,22 @@ async def handle_service_choice(update: Update, context: ContextTypes.DEFAULT_TY
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
 
+    # Команды
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("меню", menu))
+    app.add_handler(CommandHandler("menu", menu))  # латиница для Telegram
+
+    # Обработчик текста на русском
+    async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = update.message.text.lower()
+        if text == "меню":
+            await menu(update, context)
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+
+    # Обработчики сообщений, фото, локации
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
-    app.add_handler(MessageHandler(filters.Regex(r"СТО|Мойка|Шиномонтаж"), handle_service_choice))
 
     print("🔥 Умный бот запущен")
     app.run_polling()
