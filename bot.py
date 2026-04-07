@@ -170,7 +170,7 @@ async def search_places(lat: float, lng: float, keywords: list, radius: int = 80
 
 # ------------------ HANDLERS ------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Опиши проблему с авто или отправь фото")
+    await update.message.reply_text("Здравствуйте, я ваш Авто помощник. Я тут чтобы вам помочь с любыми вопросами по поводу вашего Авто! ")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
